@@ -8,7 +8,7 @@ Any code or data resuse should cite
 [insert citation when published]
 
 ## Recommended directory structure
-Working_Directory
+Working_Directory/
 ├── docs/
 ├── scripts/
 ├── input/
