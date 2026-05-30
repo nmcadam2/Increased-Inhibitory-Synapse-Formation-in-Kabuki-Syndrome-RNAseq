@@ -10,11 +10,11 @@ wd="$(pwd)"
 set -euo pipefail
 trap 'echo "[$(date)] ERROR at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
-# Directory checks
+#Directory checks
 mkdir -p "${wd}/output" "${wd}/logs" "${wd}/output/mapped/summary"
 echo "[$(date)]: ensured output/, logs/, output/mapped/summary/ exist"
 
-# module load
+# module load - this module loads hisat2 v2.1.0 used for mapping
 module load bio/2.0
 
 #Input discovery
