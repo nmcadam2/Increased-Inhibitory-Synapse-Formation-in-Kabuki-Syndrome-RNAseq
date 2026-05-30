@@ -8,12 +8,13 @@ Any code or data resuse should cite
 [insert citation when published]
 
 ## Recommended directory structure
+
 ```text
 Working_Directory/
 ├── docs/
 ├── scripts/
 ├── input/
-├── results/
-├── Experiment1/
-└── Experiment2/
+└── results/
+    ├── Experiment1/
+    └── Experiment2/
 ```
