@@ -1,0 +1,212 @@
+---
+title: "rMATS JCEC Filtering and Plotting"
+author: "Neil McAdams"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Setup
+
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readr)
+library(data.table)
+library(stringr)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+```
+
+```{r rmats output readin, results='hide', message=FALSE,warning=FALSE}
+#Read in all JCEC events
+results<- list.files(path = "./input/E1_rmats/", pattern = "MATS.JCEC.txt$")
+for (i in results){
+  assign(gsub(".txt","",x = i), read_tsv(paste0("./input/E1_rmats/", i)))
+}
+```
+
+## Results Filtering
+
+```{r filter function}
+#This function sums the comma-separated read counts in the IJC and SJC columns, averages them across replicates, and filters events based on a specified read coverage threshold. It adds two new columns to the dataframe for the average counts in each sample group before applying the filter.
+
+rmats_filter_readCov <- function(df, readCov = 10) {
+  
+  #Sum comma-separated counts
+  sum_counts <- function(x) {
+    sapply(strsplit(as.character(x), ","), function(v) {
+      sum(as.numeric(v), na.rm = TRUE)
+    })
+  }
+  
+  #Sum read counts for coverage filter
+  ijc1 <- sum_counts(df$IJC_SAMPLE_1)
+  sjc1 <- sum_counts(df$SJC_SAMPLE_1)
+  ijc2 <- sum_counts(df$IJC_SAMPLE_2)
+  sjc2 <- sum_counts(df$SJC_SAMPLE_2)
+
+  #Number of replicates
+  n1 <- 3
+  n2 <- 3
+  
+  #Average coverage per group
+  avgCount1 <- (ijc1 + sjc1) / n1
+  avgCount2 <- (ijc2 + sjc2) / n2
+  
+  #Add to dataframe \
+  df$averageCountSample1 <- avgCount1
+  df$averageCountSample2 <- avgCount2
+  
+  # Filter like rMATS tutorial
+  df_filtered <- df[avgCount1 >= readCov & avgCount2 >= readCov, ]
+  
+  return(df_filtered)
+}
+```
+
+```{r FDR filtering}
+names<-c("A3SS.MATS.JCEC", "A5SS.MATS.JCEC", "MXE.MATS.JCEC", "RI.MATS.JCEC", "SE.MATS.JCEC")
+
+#Full filter for FDR and read coverage to make results tables
+for (i in names){
+  assign(paste0(i, ".fdr"), get(i) %>%
+           filter(FDR <= 0.01) %>%
+           filter(0.05<IncLevel1 & IncLevel2<0.95) %>%
+           filter(0.05<IncLevel2 & IncLevel2<0.95) %>%
+           filter(abs(IncLevelDifference) >= 0.05) %>%
+           rmats_filter_readCov(readCov = 10))
+}
+
+#Filter for coverage support and inclusion level only to make volcano plots
+for (i in names){
+  assign(paste0(i, ".filtered"), get(i) %>%
+           filter(0.05<IncLevel1 & IncLevel2<0.95) %>%
+           filter(0.05<IncLevel2 & IncLevel2<0.95) %>%
+           rmats_filter_readCov(readCov = 10))
+}
+
+#How many genes have...
+#More than 10 counts
+#FDR <= 0.01
+#IncLevel1 and IncLevel2 between 0.05 and 0.95
+#A delta PSI of at least 0.05 (5% differences in splicing)
+
+```
+
+## Prepare Results Table
+
+```{r Functional information}
+gtf<-fread("./input/RefSeqGRCm39_genomic.gtf", comment.char = "#", sep ="\t", header = F,quote ="", fill = T, data.table =F)
+colnames(gtf) <- c("seqname", "source", "feature", "start", "end", "score", "strand", "frame", "attributes")
+
+gtf <- gtf[gtf$feature == "gene", ]
+gtf$description <- str_match(gtf$attributes, 'description "([^"]*)"')[,2]
+gtf$symbol <- str_match(gtf$attributes, 'gene_id "([^"]*)"')[,2]
+
+#Build a result table
+for (i in names){
+  assign(paste0(i, ".fdr"), get(paste0(i, ".fdr")) %>% rename(EventID = "ID...1"))
+  assign(paste0(i, ".fdr"), get(paste0(i, ".fdr"))[,-3])
+  assign(paste0(i, ".fdr"), get(paste0(i, ".fdr"))[,-11])
+  assign(paste0(i, ".fdr"), get(paste0(i, ".fdr")) %>% left_join(gtf[,c("symbol", "description")], by = c("GeneID" = "symbol")))
+}
+```
+
+```{r saving results}
+for (i in names){
+  write_tsv(get(paste0(i, ".fdr")),file =  paste0("./input/E1_rmats", i, "_fdr_filtered.tsv"))
+}
+
+for (i in names){
+  write_tsv(get(paste0(i, ".filtered")),file =  paste0("./input/E1_rmats", i, "_filtered.tsv"))
+}
+
+#For sashimi plotting
+for (i in names){
+  res<-get(i)
+  res.sig<-get(paste0(i, ".fdr"))
+  assign(paste0(i, ".sashimi") ,res[res$ID...1 %in% res.sig$EventID,])
+  write_tsv(get(paste0(i, ".sashimi")), file = paste0("./input/E1_rmats", i, "_sashimi.tsv"))
+}
+```
+
+## Volcano Plot Vizualizations
+
+```{r volcano prep}
+for (i in names){
+  assign(paste0(i, ".fdr"), get(paste0(i, ".fdr")) %>% mutate(negLogFDR = -log10(FDR)))
+}
+```
+
+```{r volacno plotting function}
+rmats_volcano_gg <- function(df, fdr_cut = 0.01, dpsi_cut = 0.05,
+                             label_col = "geneSymbol", top_n_labels = 20, title = NULL) {
+  
+  df <- df[!is.na(df$FDR) & df$FDR > 0, ]
+  df$negLogFDR <- -log10(df$FDR)
+  df$negLogFDR[df$negLogFDR > 15] <- 15
+  
+  df$group <- "Not significant"
+  df$group[df$FDR <= fdr_cut & df$IncLevelDifference >= dpsi_cut] <- "Higher in KS1 Hippocampus"
+  df$group[df$FDR <= fdr_cut & df$IncLevelDifference <= -dpsi_cut] <- "Higher in WT"
+  
+  sig <- df[df$group != "Not significant", ]
+  sig$rankScore <- sig$negLogFDR * abs(sig$IncLevelDifference)
+  sig <- sig[order(-sig$rankScore), ]
+  sig_top <- head(sig, top_n_labels)
+  
+  ggplot(df, aes(IncLevelDifference, negLogFDR, color = group)) +
+    geom_point( alpha = 0.7) +
+    geom_vline(xintercept = c(-dpsi_cut, dpsi_cut), linetype = "dashed") +
+    geom_hline(yintercept = -log10(fdr_cut), linetype = "dashed") +
+    geom_text_repel(
+      data = sig_top,
+      aes(label = .data[[label_col]]),
+      size = 3
+    )+
+    scale_color_manual(values = c(
+      "Not significant" = "grey70",
+      "Higher in KS1 Hippocampus" = "red",
+      "Higher in WT" = "steelblue"
+    )) +
+    theme_classic(base_size = 14)+
+    xlim(-1, 1)+
+    ylim(0, 15)+
+    labs(x = "Delta PSI",
+         y = "-log10(FDR)",
+         color = "",
+         title = title)
+}
+
+#plot volcano plots
+vol<-rmats_volcano_gg(SE.MATS.JCEC.filtered,
+              fdr_cut = 0.01,
+              dpsi_cut = 0.05, label_col = "GeneID", top_n_labels =  30, title = "Skipped Exons")
+ggsave("./results/Experiment1/SE_VolcanoPlot.svg", plot = vol, width = 8, height = 6, dpi = 300)
+vol
+
+vol<-rmats_volcano_gg(RI.MATS.JCEC.filtered,
+              fdr_cut = 0.01,
+              dpsi_cut = 0.05, label_col = "GeneID", top_n_labels =  30, title = "Retained Introns")
+ggsave("./results/Experiment1/RI_VolcanoPlot.svg", plot = vol, width = 8, height = 6, dpi = 300)
+vol
+
+vol<-rmats_volcano_gg(MXE.MATS.JCEC.filtered,
+              fdr_cut = 0.01,
+              dpsi_cut = 0.05, label_col = "GeneID", top_n_labels =  30, title = "Mutually Exclusive Exons")
+ggsave("./results/Experiment1/MXE_VolcanoPlot.svg", plot = vol, width = 8, height = 6, dpi = 300)
+vol
+
+vol<-rmats_volcano_gg(A3SS.MATS.JCEC.filtered,
+              fdr_cut = 0.01,
+              dpsi_cut = 0.05, label_col = "GeneID", top_n_labels =  30, title = "Alternate 3' Start Site")
+ggsave("./results/Experiment1/A3SS_VolcanoPlot.svg", plot = vol, width = 8, height = 6, dpi = 300)
+vol
+
+vol<-rmats_volcano_gg(A5SS.MATS.JCEC.filtered,
+              fdr_cut = 0.01,
+              dpsi_cut = 0.05, label_col = "GeneID", top_n_labels =  30, title = "Alternate 5' Start Site")
+ggsave("./results/Experiment1/A5SS_VolcanoPlot.svg", plot = vol, width = 8, height = 6, dpi = 300)
+vol
+```
