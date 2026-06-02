@@ -1,0 +1,441 @@
+---
+title: "GSEA Workflow"
+author:
+  - name: "Neil McAdams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: cosmo
+    highlight: tango
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  cache = TRUE
+)
+set.seed(1234)
+```
+
+## Setup
+
+```{r libraries, message=FALSE, warning= FALSE}
+library(dplyr)
+library(readr)
+library(purrr)
+library(tibble)
+library(AnnotationDbi)
+library(org.Mm.eg.db)
+library(clusterProfiler)
+library(enrichplot)
+library(ggplot2)
+library(ggraph)
+library(BiocParallel)
+library(ReactomePA)
+library(sessioninfo)
+library(cluster)
+```
+
+For this analysis simply switch out which input file is being used. It should either be ./results/Experiment1/DESeq2/Results.csv or ./results/Experiment2/DESeq2/Results.csv. Update any other relevant filepaths or comments throughout the document; e.g. the result directory path should correspond to the correct experiment.
+
+```{r paths}
+# Keep original path structure
+project_dir <- "C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder"
+res_dir <- "C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/results/Experiment2/KS1/GSEA"
+input_file <- file.path(project_dir, "results/Experiment2/KS1/DESeq2/Results.csv")
+
+if (!dir.exists(res_dir)) {
+  dir.create(res_dir, recursive = TRUE)
+}
+
+#Optional: keep for compatibility with any downstream relative paths
+setwd(project_dir)
+
+#Parallel backend
+n_workers <- max(1, parallel::detectCores(logical = FALSE) - 2)
+bp <- SnowParam(workers = n_workers, type = "SOCK")
+register(bp)
+```
+
+## Helper functions
+
+### Prepare Dataset
+This produces a Wald ranked gene set, a vector of log2 fold changes for significant genes, and a list of significant gene symbols for use in labeling GSEA results. It also saves the raw results and annotation table for reference.
+
+```{r Helper Function: Prepare Rank Data}
+#Prepare ranked gene list and associated data for GSEA analysis.
+
+prepare_ranked_data <- function(file, orgdb) {
+  
+  raw_res <- readr::read_csv(file, show_col_types = FALSE)
+
+  if (!"SYMBOL" %in% names(raw_res)) {
+    names(raw_res)[1] <- "SYMBOL"
+  }
+
+  #Build annotation table using annoDBI for 
+  annotation_tbl <- tibble::tibble(
+    SYMBOL = raw_res$SYMBOL,
+    ENTREZID = AnnotationDbi::mapIds(
+      orgdb,
+      keys = raw_res$SYMBOL,
+      column = "ENTREZID",
+      keytype = "SYMBOL",
+      multiVals = "first"
+    ) |> unname()
+  ) |>
+    dplyr::distinct()
+
+  #Rank results by Wald statistic
+  ranked_tbl <- raw_res |>
+    dplyr::left_join(annotation_tbl, by = "SYMBOL") |>
+    dplyr::filter(!is.na(ENTREZID), !is.na(stat), is.finite(stat)) |>
+    dplyr::group_by(ENTREZID) |>
+    dplyr::slice_max(order_by = abs(stat), n = 1, with_ties = FALSE) |>
+    dplyr::ungroup()
+
+  gene_list <- ranked_tbl$stat
+  
+  names(gene_list) <- as.character(ranked_tbl$ENTREZID)
+  
+  gene_list <- sort(gene_list, decreasing = TRUE)
+
+  entrez_to_symbol <- tibble::tibble(
+    ENTREZID = unique(as.character(ranked_tbl$ENTREZID)),
+    mapped_SYMBOL = AnnotationDbi::mapIds(
+      orgdb,
+      keys = unique(as.character(ranked_tbl$ENTREZID)),
+      column = "SYMBOL",
+      keytype = "ENTREZID",
+      multiVals = "first"
+    ) |> unname()
+  ) |>
+    dplyr::filter(!is.na(mapped_SYMBOL))
+
+  sig_symbols <- ranked_tbl |>
+    dplyr::filter(!is.na(padj), !is.na(log2FoldChange)) |>
+    dplyr::filter(padj < 0.05, abs(log2FoldChange) >= 0.5) |>
+    dplyr::mutate(ENTREZID = as.character(ENTREZID)) |>
+    dplyr::left_join(entrez_to_symbol, by = "ENTREZID") |>
+    dplyr::filter(!is.na(mapped_SYMBOL)) |>
+    dplyr::distinct(mapped_SYMBOL) |>
+    dplyr::pull(mapped_SYMBOL)
+
+  fc_tbl <- ranked_tbl |>
+    dplyr::filter(!is.na(log2FoldChange), is.finite(log2FoldChange)) |>
+    dplyr::mutate(ENTREZID = as.character(ENTREZID)) |>
+    dplyr::left_join(entrez_to_symbol, by = "ENTREZID") |>
+    dplyr::filter(!is.na(mapped_SYMBOL)) |>
+    dplyr::distinct(mapped_SYMBOL, .keep_all = TRUE) |>
+    dplyr::select(mapped_SYMBOL, log2FoldChange)
+
+  fc_vector <- fc_tbl$log2FoldChange
+  
+  names(fc_vector) <- fc_tbl$mapped_SYMBOL
+
+  list(
+    raw = raw_res,
+    annotation = annotation_tbl,
+    ranked_tbl = ranked_tbl,
+    gene_list = gene_list,
+    sig_symbols = sig_symbols,
+    fc_vector = fc_vector
+  )
+}
+```
+
+### Run GO Enrichment Analysis
+This function performs gseGO analysis for a specified ontology, saves the results, and generates a tree plot of the top terms. It also simplifies the results using **simplify()** with method "Wang" to reduce redundancy of significant terms before plotting.
+
+```{r Helper Function: Run GO Analysis}
+run_go_gsea <- function(gene_list, ont, orgdb, bp, res_dir,
+                        min_gs = 20, max_gs = 500, p_cutoff = 0.05,
+                        show_n = 30, nCluster = 5) {
+  gsea_obj <- gseGO(
+    geneList = gene_list,
+    OrgDb = orgdb,
+    keyType = "ENTREZID",
+    ont = ont,
+    minGSSize = min_gs,
+    maxGSSize = max_gs,
+    pvalueCutoff = p_cutoff,
+    verbose = FALSE,
+    eps = 0,
+    BPPARAM = bp
+  )
+
+  gsea_obj <- setReadable(gsea_obj, OrgDb = orgdb, keyType = "ENTREZID")
+
+  readr::write_csv(as_tibble(gsea_obj@result),
+                   file.path(res_dir, paste0("GSEA_", ont, "_table.csv")))
+  
+  saveRDS(gsea_obj, file.path(res_dir, paste0("gsea", ont, ".rds")))
+
+  if (nrow(gsea_obj@result) > 1) {
+    
+    gsea_obj <- clusterProfiler::simplify(gsea_obj, cutoff = 0.7, by = "p.adjust", measure = "Wang")
+    
+    readr::write_csv(as_tibble(gsea_obj@result),
+                   file.path(res_dir, paste0("GSEA_", ont, "_simplified_table.csv")))
+   
+    gsea_sim <- pairwise_termsim(gsea_obj)
+    
+    p_tree <- treeplot(
+      gsea_sim,
+      color = "NES",
+      nWords = 4,
+      nCluster = nCluster,
+      showCategory = min(show_n, nrow(gsea_obj@result)),
+      hilight = FALSE,
+      cluster.params = list(color = rep("black", nCluster))
+    )  +
+      ggplot2::scale_color_gradient2(
+        low = "blue",
+        mid = "white",
+        high = "red",
+        midpoint = 0,
+        name = "NES"
+      )+
+      ggtitle(paste("Top", ont, "Terms GSEA treeplot"))
+
+    ggsave(
+      filename = file.path(res_dir, paste0("GSEA_Top", ont, "_treeplot.svg")),
+      plot = p_tree,
+      width = 16,
+      height = 10
+    )
+  }
+
+  gsea_obj
+}
+```
+
+### Treeplots Helper
+This prepares the function for tree plotting of select enriched GO terms.
+
+```{r Helper Function: Tree Plots of Select Terms}
+plot_selected_tree <- function(gsea_obj, selected_terms, nCluster = 5, out_file, title_txt, show_n = NULL) {
+  
+  subset_gsea <- filter(gsea_obj, Description %in% selected_terms)
+
+  if (nrow(subset_gsea@result) > 1) {
+  
+      subset_sim <- pairwise_termsim(subset_gsea)
+    
+      if (is.null(show_n)) show_n <- length(selected_terms)
+
+      p_tree <- treeplot(
+        subset_sim,
+        nWords = 4,
+        nCluster = nCluster,
+        showCategory = min(show_n, nrow(subset_gsea@result)),
+        hilight = FALSE,
+        cluster.params = list(color = rep("black", nCluster))
+      )+
+        ggtitle(title_txt)
+
+    ggsave(out_file, p_tree, width = 12, height = 10)
+  }
+
+  invisible(subset_gsea)
+}
+```
+
+### CNET Helper
+This prepares the function for concept network plotting of select or top enriched GO terms, as well as reformatting to only label genes that were significantly DE between mutant and wildtype.
+
+```{r Helper Function: Customized CNETs}
+plot_cnet_exact <- function(gsea_obj, fc_vector, sig_symbols, layout = "dh",
+                            out_file, showCat = 6, selected_terms = NULL) {
+  
+  if (is.null(selected_terms)) {
+  
+      gsea_net <- setReadable(gsea_obj, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+
+      p1 <- enrichplot::cnetplot(
+        gsea_net,
+        layout = "dh",
+        showCategory = showCat,
+        foldChange = fc_vector,
+        node_label = "none"
+      ) +
+        ggplot2::scale_color_gradient2(
+          low = "blue",
+          mid = "white",
+          high = "red",
+          midpoint = 0,
+          name = "Log2FoldChange"
+        )
+
+    term_nodes <- head(unique(p1$data$name), showCat)
+
+  } else {
+  
+      subset_gsea <- dplyr::filter(gsea_obj, Description %in% selected_terms)
+    
+      gsea_net <- setReadable(subset_gsea, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+
+      p1 <- enrichplot::cnetplot(
+        gsea_net,
+        layout = "dh",
+        showCategory = selected_terms,
+        foldChange = fc_vector,
+        node_label = "none",
+        name = "Log2FoldChange"
+      ) +
+        ggplot2::scale_color_gradient2(
+          low = "blue",
+          mid = "white",
+          high = "red",
+          midpoint = 0,
+          name = "Log2FoldChange"
+        )
+
+    term_nodes <- selected_terms
+  }
+
+  gene_label_nodes <- p1$data %>%
+    dplyr::filter(name %in% sig_symbols)
+
+  term_label_nodes <- p1$data %>%
+    dplyr::filter(name %in% term_nodes)
+
+  p2 <- p1 +
+    ggraph::geom_node_label(
+      data = gene_label_nodes,
+      aes(x = x, y = y, label = name),
+      fill = scales::alpha("white", 0.85),
+      color = "black",
+      label.size = 0.2,
+      label.padding = grid::unit(0.15, "lines"),
+      repel = TRUE,
+      size = 3.5
+    ) +
+  ggraph::geom_node_text(
+    data = term_label_nodes,
+    aes(x = x, y = y, label = stringr::str_wrap(name, width = 26)),
+    fill = scales::alpha("white", 0.85),
+    color = "black",
+    label.size = 1,
+    label.padding = grid::unit(0.15, "lines"),
+    repel = TRUE,
+    size = 5,
+    vjust = -0.8)
+  
+  svg(filename = out_file, width = 16, height = 14, bg = "white")
+  print(p2)
+  dev.off()
+}
+```
+
+## Load Data
+
+```{r load-and-prepare-data}
+analysis_data <- prepare_ranked_data(input_file, org.Mm.eg.db)
+
+ranked_tbl <- analysis_data$ranked_tbl
+gene_list <- analysis_data$gene_list
+sig_symbols <- analysis_data$sig_symbols
+fc_vector <- analysis_data$fc_vector
+```
+
+## Perform GO Enrichment Analysis and Tree Plotting
+
+```{r go-gsea}
+onts <- c("BP", "MF", "CC")
+
+go_results <- purrr::set_names(onts) |>
+  purrr::map(~ run_go_gsea(
+    gene_list = gene_list,
+    ont = .x,
+    nCluster = 5,
+    orgdb = org.Mm.eg.db,
+    bp = bp,
+    res_dir = res_dir
+  ))
+
+gseaBP <- go_results$BP
+gseaMF <- go_results$MF
+gseaCC <- go_results$CC
+```
+
+```{r selected-bp-tree}
+#This code was used in the original manuscript draft but after completing revisions we opted to not bother using select terms and instead focus primarily on top terms when plotting. It is kept in this document for reference.
+
+#hippocampus
+#selectTerms<- c("immune effector process","neurotransmitter transport","regulation of immune effector process","adaptive immune response","cytokine-mediated signaling pathway","regulation of leukocyte activation","synaptic vesicle cycle","leukocyte cell-cell adhesion","embryonic epithelial tube formation","extrinsic apoptotic signaling pathway","exocytic process","neural tube development","stem cell differentiation","regulation of monoatomic ion transport","peptidyl-tyrosine modification","response to BMP","negative regulation of proteolysis","transforming growth factor beta receptor superfamily signaling pathway","cytoskeleton-dependent intracellular transport","epidermal cell differentiation","vesicle fusion","response to calcium ion","calcium ion homeostasis","regulation of innate immune response","negative regulation of immune system process","positive regulation of cytokine production","immune response-regulating signaling pathway","protein localization to synapse","regulation of gliogenesis","synapse assembly","collagen metabolic process","regulation of muscle contraction","autophagosome assembly","regulation of postsynaptic membrane neurotransmitter receptor levels","regulation of synapse structure or activity","homeostasis of number of cells","tumor necrosis factor superfamily cytokine production","tumor necrosis factor production","type I interferon production","interleukin-6 production","production of molecular mediator of immune response","cytokine production involved in immune response","regulation of postsynaptic membrane neurotransmitter receptor levels","regulation of synapse structure or activity","homeostasis of number of cells","regulation of membrane potential","regulation of postsynaptic membrane potential","action potential","regulation of type I interferon production","regulation of interleukin-6 production","regulation of production of molecular mediator of immune response","response to type II interferon","cellular response to type II interferon","immune response-regulating signaling pathway","canonical NF-kappaB signal transduction","cell surface receptor protein serine/threonine kinase signaling pathway","cell surface receptor signaling pathway via JAK-STAT","non-canonical NF-kappaB signal transduction","regulation of transmembrane receptor protein serine/threonine kinase signaling pathway","smoothened signaling pathway","immune effector process","signal release from synapse","neurotransmitter secretion","synaptic vesicle exocytosis","signal release","cellular response to lipid","regulation of canonical NF-kappaB signal transduction","regulation of synaptic plasticity","positive regulation of synaptic transmission","excitatory postsynaptic potential","chemical synaptic transmission, postsynaptic","synaptic transmission, glutamatergic","long-term synaptic potentiation","protein localization to synapse","protein localization to cell junction","receptor localization to synapse","protein-containing complex localization","regulation of gliogenesis","gliogenesis","neuron migration","neural tube development","synapse assembly","regulation of synapse organization","postsynapse organization","regulation of synapse assembly","regulation of postsynapse organization")
+
+#glia
+#KS1 E2 obtained
+#selectTerms <- c("mitochondrial gene expression","mRNA processing","myelination", "gliogenesis","regulation of neurogenesis","synapse organization","axon development","regulation of membrane potential","modulation of chemical synaptic transmission","neurotransmitter transport","monoamine transport","neuron migration","cell junction assembly","regulation of apoptotic signaling pathway","positive regulation of MAPK cascade","peptidyl-lysine modification","methylation","response to calcium ion","response to axon injury","protein insertion into mitochondrial membrane","protein folding","hexose catabolic process","antigen processing and presentation of endogenous antigen","positive regulation of leukocyte mediated immunity","axoneme assembly")
+
+#subset_gseaBP <- plot_selected_tree(
+#  gsea_obj = gseaBP,
+#  selected_terms = selectTerms,
+#  out_file = file.path(res_dir, "GSEA_selectedBP_treeplot.svg"),
+#  title_txt = "Selected BP Terms GSEA treeplot"
+#)
+```
+
+## Gene Concept Network Plots
+
+```{r cnet-plots}
+plot_cnet_exact(
+  gsea_obj = gseaBP,
+  fc_vector = fc_vector,
+  sig_symbols = sig_symbols,
+  out_file = file.path(res_dir, "CNET_topBP.svg"),
+  showCat = 6
+)
+
+#hippocampus
+#selected_cnet_terms <- c("neuron migration","cytokine-mediated signaling pathway","gliogenesis","regulation of postsynaptic membrane potential")
+
+#glia
+selected_cnet_terms <- c("positive regulation of leukocyte mediated immunity", "regulation of apoptotic signaling pathway", "neuron migration", "gliogenesis", "synapse organization")
+
+plot_cnet_exact(
+  gsea_obj = gseaBP,
+  fc_vector = fc_vector,
+  sig_symbols = sig_symbols,
+  out_file = file.path(res_dir, "CNET_selectedBP.svg"),
+  selected_terms = selected_cnet_terms
+)
+
+
+plot_cnet_exact(
+  gsea_obj = gseaMF,
+  fc_vector = fc_vector,
+  sig_symbols = sig_symbols,
+  out_file = file.path(res_dir, "CNET_topMF.svg"),
+  showCat = 6
+)
+
+
+plot_cnet_exact(
+  gsea_obj = gseaCC,
+  fc_vector = fc_vector,
+  sig_symbols = sig_symbols,
+  out_file = file.path(res_dir, "CNET_topCC.svg"),,
+  showCat = 6
+)
+```
+
+## Save session info
+
+```{r save-session-info}
+writeLines(
+  capture.output(sessioninfo::session_info()),
+  file.path(res_dir, "session_info.txt")
+)
+
+sessioninfo::session_info()
+```
