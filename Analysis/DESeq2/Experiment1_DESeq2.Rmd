@@ -183,7 +183,7 @@ res.sig.lfc = res.sig[abs(res.sig$log2FoldChange) > 0.5,]; nrow(res.sig.lfc) # f
 
 ```{r Results Plotting: Volcano}
 #Volcano plot
-source("../../../Kabuki Syndrome RNASeq Analysis/OLD/old/fancy_volcano_plot.R") #Custom Volcano plot script prepared by the Patzke lab - I modified it slightly to allow for custom x axis limits and custom titles
+source("./fancy_volcano_plot.R") #Custom Volcano plot script prepared by the Patzke lab - I modified it slightly to allow for custom x axis limits and custom titles
 
 #svg(paste(res.dir,"Volcano.svg", sep = ""), width = 8, height = 7,bg = "white") 
 fancy_volcano_plot(res.nona, 0.05, 0.5, 3, "DEGs in Cre vs deltaCre +/-0.5")
