@@ -1,0 +1,425 @@
+---
+title: "Experiment 1 Mouse Hippocampal DEA"
+author: 
+  - name: "Neil McAdams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: cosmo
+    highlight: tango
+    df_print: paged
+---
+
+## Setup
+
+```{r Setup, include=TRUE, warning=FALSE, message=FALSE, results='hide'}
+#Libraries for analysis
+library(edgeR)
+library(readr)
+library(variancePartition)
+library(DESeq2)
+library(pheatmap)
+library(tidyverse)
+library(dplyr)
+library(RColorBrewer)
+library(gridExtra)
+library(grid)
+library(PCAtools)
+library(matrixStats)
+library(tidyr)
+library(ggplot2)
+library(BayesPrism)
+
+#Set Directories
+setwd("C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/")
+res.dir <- "C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/results/Experiment1/DESeq2/"; if(!dir.exists(res.dir)){dir.create(res.dir, recursive = TRUE)}
+
+```
+
+```{r Load Data and Preprocess, message=FALSE, warning=FALSE}
+#Load and Format Data
+#Load in data
+metaTable <- read.csv("./input/Experiment1_KS1_metadata.csv"); head(metaTable)
+countsTab <- read.delim("./input/E1KS1_counts.tsv", header = TRUE, row.names = 1)
+countsTab <-countsTab[,c(metaTable$File)]
+colnames(countsTab) <- metaTable$Sample.Name
+
+#Make counts integers
+countsTab[] <- lapply(countsTab, function(x) if (is.numeric(x)) as.integer(x) else x)
+
+#Remove Y chromosome genes - Experiment did not control for mouse sex so Y must be removed from analysis
+Ygenes <- readLines("./input/YChromosome_genes.txt")
+nrow(countsTab);countsTab <- countsTab %>% filter(!(rownames(countsTab) %in% Ygenes)); nrow(countsTab) #decrease by ~ 290
+
+#Filter low counts - Using 15 for a slightly more stringent than the default recommendation of DESeq2
+drop <- rowSums(countsTab < 15) > 3
+workingCounts <- countsTab[!drop, ]
+
+#make metaData factors
+for (i in 1:ncol(metaTable)) {metaTable[,i] <- as.factor(metaTable[,i])}
+
+#Relevel 
+metaTable$Group <- relevel(as.factor(metaTable$Group), "deltaCre")
+metaTable$Litter <- as.factor(metaTable$Litter)
+
+#write model
+design <- ~ Litter + Group
+
+#Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData = workingCounts,
+                              colData = metaTable,
+                              design = design)
+```
+
+```{r Run Model}
+#Run DESeq2 model
+dds <- DESeq(dds)
+
+#stabilize variance - for sample level visualizations
+vsd <- vst(dds, blind=FALSE)
+```
+
+## Exploratory Vizualization
+
+```{r Exploratory Visualization: Dispersion}
+#Dispersion
+#svg(paste(res.dir,"Dispersion.svg", sep = ""),width = 8, height = 7,bg = "white")
+plotDispEsts(dds)
+#dev.off()
+```
+
+```{r Exploratory Visualizations: Distance}
+#Distance matrix
+colors <- colorRampPalette(brewer.pal(9, "Blues") )(255)
+distanceDat<-assay(vsd)
+colnames(distanceDat)<- metaTable$Sample.Name
+sample_metadata <- data.frame(Group = c("deltaCre", "deltaCre", "deltaCre", "Cre", "Cre", "Cre"),
+                              Litter = c("1", "2", "3", "1", "2", "3"),
+                              row.names = metaTable$Sample.Name)
+
+ann_colors<-list(Group = c(Cre="#FFD500", deltaCre="#005BBB"),
+                 Litter = c("1" = "#FFBE6A", "2" = "#40B0A6", "3" = "#DB4C77"))
+
+#svg(paste(res.dir,"DistanceMap.svg", sep = ""),width = 12, height = 12, bg = "white") 
+pheatmap(cor(distanceDat),
+         clustering_distance_rows="euclidean",
+         clustering_distance_cols="euclidean",
+         cellwidth = 30,
+         cellheight = 30,
+         annotation_col = sample_metadata,
+         annotation_row = sample_metadata,
+         annotation_names_col = F,
+         annotation_names_row = F,
+         annotation_colors = ann_colors,
+         annotation_legend = T,
+         labels_row = colnames(distanceDat),
+         labels_col = c("","","","","",""),
+         col = colors)
+#dev.off()
+```
+
+```{r Exploratory Visualizations: PCA}
+#PCA
+pcaData <- plotPCA(vsd, intgroup=c("Group", "Litter"), returnData=TRUE)
+colnames(pcaData)<- c("PC1", "PC2","combined","Group","Litter","Name")
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+#svg(paste(res.dir,"PCA.svg", sep = ""),width = 8, height = 7, bg = "white") 
+ggplot(pcaData, aes(PC1, PC2, color=Group, shape=Litter)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  coord_fixed()+
+  scale_color_manual(values = c(Cre="#FFD500", deltaCre="#005BBB"))+
+  theme_bw()
+#dev.off()
+```
+
+```{r Exploratory Visualizations: PCAtools, warning=FALSE,message=FALSE}
+rv <- rowVars(assay(vsd))
+select <- order(rv, decreasing=TRUE)[1:500]
+p<- pca(assay(vsd)[select,], metadata=colData(vsd), removeVar = 0)
+
+#svg(paste(res.dir,"PCA_scree.svg", sep = ""),width = 8, height = 7, bg = "white") 
+screeplot(p)
+#dev.off()
+
+#svg(paste(res.dir,"PCA_biplot_1_2.svg", sep = ""),width = 8, height = 11, bg = "white") 
+biplot(p, x = "PC1", y = "PC2", colby = 'Group', shape = "Litter", showLoadings = TRUE,labSize = 2, pointSize = 2, sizeLoadingsNames = 2)
+#dev.off()
+
+#svg(paste(res.dir,"PCA_pairsplot.svg", sep = ""),width = 16, height = 16, bg = "white") 
+pairsplot(p, colby = 'Group', shape = 'Litter', lab = p$yvars, labSize = 3, pointSize = 2)
+#dev.off()
+
+#svg(paste(res.dir,"PCA_loadings.svg", sep = ""),width = 8, height = 11, bg = "white") 
+plotloadings(p, labSize = 3)
+#dev.off()
+```
+
+## Call Result Contrasts
+
+```{r Results}
+#Results and result plotting
+#Generate Results
+results <- results(dds, name= "Group_Cre_vs_deltaCre")
+
+#Filter Results - I opt for p-adj <= 0.05 and LFC of +/- 0.5 per literature values of LFC in neuron cell culture
+res.nona <- na.omit(results)
+res.sig = res.nona[res.nona$padj <= 0.05,] ; nrow(res.sig) # for number of DE Genes at p <= 0.05
+res.sig.lfc = res.sig[abs(res.sig$log2FoldChange) > 0.5,]; nrow(res.sig.lfc) # for number of DE Genes at p <= 0.05 & FC =/- 1.5
+
+#write.csv(res.nona, paste(res.dir,"Results.csv", sep = ""), quote=FALSE)
+#write.csv(res.sig, paste(res.dir,"sigResults.csv", sep = ""), quote=FALSE)
+#write.csv(res.sig.lfc, paste(res.dir,"sig_fcResults_abs05.csv", sep = ""), quote=FALSE)
+```
+
+## Result Plotting
+
+```{r Results Plotting: Volcano}
+#Volcano plot
+source("../../../Kabuki Syndrome RNASeq Analysis/OLD/old/fancy_volcano_plot.R") #Custom Volcano plot script prepared by the Patzke lab - I modified it slightly to allow for custom x axis limits and custom titles
+
+#svg(paste(res.dir,"Volcano.svg", sep = ""), width = 8, height = 7,bg = "white") 
+fancy_volcano_plot(res.nona, 0.05, 0.5, 3, "DEGs in Cre vs deltaCre +/-0.5")
+#dev.off()
+```
+
+```{r Results Plotting: Heatmap}
+#Heatmap
+#data prep
+sig_genes <- row.names(res.sig.lfc)
+log_sig_counts <- assay(vsd)[sig_genes, ]
+colnames(log_sig_counts)<-colData(vsd)$Sample.Name
+
+#svg(paste(res.dir,"DE_Heatmapabs05.svg", sep = ""), width = 8, height = 7, bg = "white") 
+pheatmap(na.omit(log_sig_counts),
+         cluster_rows=TRUE, cluster_cols=TRUE,   # Clustering
+         annotation_col = sample_metadata,
+         annotation_names_col = F,
+         annotation_colors = ann_colors,
+         scale="row",     # Scale by row (gene) to highlight relative expression differences
+         show_rownames=F, # Optional: hide gene names for large datasets
+         show_colnames = TRUE,
+         main="Heatmap of Significant DE Genes")
+#dev.off()
+```
+
+```{r LFC Shrink}
+#LFC Shrinkage - for more accurate GSEA results
+results_ashr_shrink <- na.omit(lfcShrink(dds, coef = "Group_Cre_vs_deltaCre"), type = "ashr")
+#write.csv(results_ashr_shrink, paste(res.dir,"Results_ashr_shrink.csv", sep = ""), quote=FALSE)
+
+#Ma plot
+#svg(paste(res.dir,"MAplot_shrunkenLFCs.svg", sep = ""), width = 8, height = 7, bg = "white")
+plotMA(results_ashr_shrink, ylim = c(-3, 3), main = "MA Plot Cre vs DeltaCre")
+#dev.off()
+```
+
+```{r Custom bar plot genes}
+#plotting lfcs
+data<- read.csv("./results/Experiment1/DESeq2/sig_fcResults_abs05.csv")
+colnames(data)<-gsub("X", "gene",colnames(data))
+
+genes.Neuroinflammation <- c("Anxa1","Atf3","C3ar1","C4b","Ccl12","Ccl9","Cd36","Egr1","F830016B08Rik","Fcgr3","Ifi204","Ifi211","Iigp1c","Il7","Mmp12","Msr1","Oas1a","Oas2","Slc15a3","Socs3","Spp1","Tgfb1","Tnfrsf1b", "Casp1", "Ccl6", "St8sia1", "Slfn5", "Fxyd1", "Gadl1")
+genes.ecm<-c("Fn1","Col8a1","Col5a2","Sparcl1","Ltbp2","Thbs1","Ccn2", "Timp3")
+genes.Synapse<- c("Adora2a","Atp1a2","Slc7a11","Slc6a1","Slc6a7","Trpm2","Fgf11","Pax2","Shh","Fst","Igf1","Sema3f","Sema3b","Sema4g", "Fxyd7")
+```
+
+## Comparative plots
+
+From this point onward it is assumed that the results files for both experiment 1 and experiment 2 have been generated.
+
+```{r comparative barplots}
+#read in results
+E1KS1_res <- read.csv("./results/Experiment1/DESeq2/Results.csv")
+E2KS1_res <- read.csv("./results/Experiment2/KS1/DESeq2/Results.csv")
+
+
+#filter for genes of interest and prepare for plotting
+rE1 <- E1KS1_res %>%
+  select(X, log2FoldChange, lfcSE, padj) %>%
+  rename(
+    log2FC_E1 = log2FoldChange,
+    lfcSE_E1  = lfcSE,
+    padj_E1   = padj
+  ) %>%
+  mutate(DE_E1 = !is.na(padj_E1) & padj_E1 < 0.05 & abs(log2FC_E1) >= 0.5)
+
+rE2 <- E2KS1_res %>%
+  select(X, log2FoldChange, lfcSE, padj) %>%
+  rename(
+    log2FC_E2 = log2FoldChange,
+    lfcSE_E2  = lfcSE,
+    padj_E2   = padj
+  ) %>%
+  mutate(DE_E2 = !is.na(padj_E2) & padj_E2 < 0.05 & abs(log2FC_E2) >= 0.5)
+
+#filter for each subset of select genes - swap out genes.synapse/genes.ecm/genes.Neuroinflammation for each plot
+plot_df <- inner_join(rE1, rE2, by = "X") %>%
+  filter(X %in% genes.Synapse) %>%
+  mutate(
+    ymin_E1 = log2FC_E1 - lfcSE_E1,
+    ymax_E1 = log2FC_E1 + lfcSE_E1,
+    ymin_E2 = log2FC_E2 - lfcSE_E2,
+    ymax_E2 = log2FC_E2 + lfcSE_E2
+  )
+
+#transform for plotting
+plot_long <- plot_df %>%
+  select(
+    X,
+    log2FC_E1, log2FC_E2,
+    ymin_E1, ymax_E1, ymin_E2, ymax_E2,
+    padj_E1, padj_E2,
+    DE_E1, DE_E2
+  ) %>%
+  pivot_longer(
+    cols = c(log2FC_E1, log2FC_E2),
+    names_to = "experiment",
+    values_to = "log2FC"
+  ) %>%
+  mutate(
+    ymin = ifelse(experiment == "log2FC_E1", ymin_E1, ymin_E2),
+    ymax = ifelse(experiment == "log2FC_E1", ymax_E1, ymax_E2),
+    padj = ifelse(experiment == "log2FC_E1", padj_E1, padj_E2),
+    DE   = ifelse(experiment == "log2FC_E1", DE_E1, DE_E2),
+    log10padj = -log10(padj),
+    experiment = recode(
+      experiment,
+      log2FC_E1 = "hippocampus",
+      log2FC_E2 = "glia"
+    )
+  )
+
+#nLog10 p.values
+plot_long$log10padj[is.infinite(plot_long$log10padj)] <- NA
+plot_long$log10padj <- pmin(plot_long$log10padj, 10)
+
+gene_order <- plot_df %>%
+  mutate(mean_fc = (log2FC_E1 + log2FC_E2) / 2) %>%
+  arrange(mean_fc) %>%
+  pull(X)
+
+plot_long$X <- factor(plot_long$X, levels = gene_order)
+
+star_df <- plot_long %>%
+  filter(DE) %>%
+  mutate(
+    star_y = ifelse(
+      log2FC >= 0,
+      ymax + 0.15,
+      ymin - 0.15
+    )
+  )
+
+#plot figure
+p <- ggplot(plot_long, aes(x = X, y = log2FC, fill = log10padj)) +
+  geom_col(width = 0.7) +
+  geom_errorbar(aes(ymin = ymin, ymax = ymax), width = 0.2) +
+  geom_text(
+    data = star_df,
+    aes(x = X, y = star_y, label = "*"),
+    inherit.aes = FALSE,
+    size = 5
+  ) +
+  coord_flip() +
+  geom_hline(yintercept = 0, colour = "gold", linewidth = 0.8) +
+  facet_wrap(~experiment, nrow = 1) +
+  theme_classic() +
+  labs(
+    title = "KS1 associated Synapse Genes in Hippocampus and Glia",
+    subtitle = "Error bars = ±SE of Log2FoldChange estimation; * = padj < 0.05 and |log2FC| ≥ 0.5",
+    x = "",
+    y = "Log2 Fold Change",
+    fill = expression(-log[10](padj))
+  ) +
+  scale_fill_gradient(
+    low = "grey85",
+    high = "blue",
+    na.value = "grey90"
+  ) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold")
+  )
+
+p
+
+#ggsave(  "./results/Experiment1/DESeq2/KS1_Synapse_E1vsE2_comparative.svg",
+#  plot = p,
+#  width = 10,
+#  height = 7
+#)
+```
+
+## Granulator Plotting
+
+This chunk requires the output from the deconvolution workflow and plots the estimated cell type proportions based on correllating expression from our bulk data with single cell expression data from the mouse cortex and hippocampus.
+
+```{r plot granulator results from deconvolution}
+#This workflow was ran on HPC but plotted here for ease of visualization
+granOut<-readRDS("./input/my.bp.6828.RDS")
+
+theta_type <- get.fraction(
+  bp = granOut,
+  which.theta = "final",
+  state.or.type = "type"
+)
+
+if (nrow(theta_type) < ncol(theta_type)) {
+  theta_type <- t(theta_type)
+}
+
+theta_df <- as.data.frame(theta_type)
+theta_df$Sample <- rownames(theta_df)
+
+
+# Convert to long format
+plot_df <- reshape(
+  theta_df,
+  varying = colnames(theta_type),
+  v.names = "Fraction",
+  timevar = "CellType",
+  times = colnames(theta_type),
+  direction = "long"
+)
+plot_df$group <- c("WT" , "WT", "MUT", "MUT", "WT", "MUT","WT" , "WT", "MUT", "MUT", "WT", "MUT","WT" , "WT", "MUT", "MUT", "WT", "MUT")
+
+rownames(plot_df) <- NULL
+
+#Stack order
+plot_df$CellType <- factor(
+  plot_df$CellType,
+  levels = c("Non-Neuronal", "Glutamatergic", "GABAergic")
+)
+
+plot_df <- plot_df %>%
+  arrange(group, Sample) %>%   #WT first, then MUT
+  mutate(Sample = factor(Sample, levels = unique(Sample)))
+
+#Plot
+p <- ggplot(plot_df, aes(x = Sample, y = Fraction * 100, fill = CellType)) +
+  geom_bar(stat = "identity", width = 0.8) +
+  labs(
+    x = "samples",
+    y = "estimated cell type proportions (%)",
+    fill = "CellType"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank()
+  )
+
+p
+# Save plot
+#ggsave("bayesprism_celltype_stackedbar.png", p, width = 8, height = 6, dpi = 600)
+
+```
+
