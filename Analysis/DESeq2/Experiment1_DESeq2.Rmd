@@ -36,8 +36,8 @@ library(ggplot2)
 library(BayesPrism)
 
 #Set Directories
-setwd("C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/")
-res.dir <- "C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/results/Experiment1/DESeq2/"; if(!dir.exists(res.dir)){dir.create(res.dir, recursive = TRUE)}
+setwd("C:/path/to/working/directory/")
+res.dir <- "C:/path/to/working/directory/results/Experiment1/DESeq2/"; if(!dir.exists(res.dir)){dir.create(res.dir, recursive = TRUE)}
 
 ```
 
