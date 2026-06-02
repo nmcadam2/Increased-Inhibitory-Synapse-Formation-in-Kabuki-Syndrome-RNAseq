@@ -1,3 +1,5 @@
+#Originally prepared by the Patzke Lab, and Sheri S. Sanders. Modified by Neil McAdams to allow custom x limits on axis and custom titles.
+
 fancy_volcano_plot <- function(data, pcut, fccut, xlim, tit, input = "deseq2") {
 library(ggplot2)
 library(readr)
