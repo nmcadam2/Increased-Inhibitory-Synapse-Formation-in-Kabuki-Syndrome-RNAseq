@@ -1,0 +1,214 @@
+---
+title: "Experiment 2 Mouse Glia DEA"
+author: 
+  - name: "Neil McAdams"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: 
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: cosmo
+    highlight: tango
+    df_print: paged
+---
+
+## Setup
+
+```{r Setup, include=TRUE, message=FALSE, warning=FALSE, results='hide'}
+#Libraries for analysis
+library(edgeR)
+library(readr)
+library(variancePartition)
+library(DESeq2)
+library(pheatmap)
+library(tidyverse)
+library(dplyr)
+library(RColorBrewer)
+library(gridExtra)
+library(grid)
+library(PCAtools)
+library(matrixStats)
+
+
+#Set Directories
+setwd("C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/")
+res.dir <- "C:/Users/neilm/OneDrive/Desktop/Rprojects/KabukiPaper/New folder/results/Experiment2/KS1/DESeq2/"; if(!dir.exists(res.dir)){dir.create(res.dir, recursive = TRUE)}
+```
+
+```{r Load Data and Preprocess, message=FALSE, warning=FALSE}
+#Load and Format Data
+#Load in data
+metaTable <- read.csv("./input/Experiment2_KS1_metadata.csv")
+countsTab <- read.delim("./input/E2KS1_counts.tsv", header = TRUE, row.names = 1)
+countsTab<-countsTab[,c(gsub("-", ".",metaTable$File))]
+colnames(countsTab) <- metaTable$Sample.Name
+#Make counts integers
+countsTab[] <- lapply(countsTab, function(x) if (is.numeric(x)) as.integer(x) else x)
+
+#Relevel 
+metaTable$Group <- relevel(as.factor(metaTable$Group), "Wildtype")
+metaTable$Sex <- as.factor(metaTable$Sex)
+metaTable$Date <- as.factor(metaTable$Date)
+
+#Filter low counts - Using 15 for a slightly more stringent than the default recommendation of DESeq2
+drop <- rowSums(countsTab < 15) > 3
+workingCounts <- countsTab[!drop, ]
+
+#make metaData factors
+for (i in 1:ncol(metaTable)) {metaTable[,i] <- as.factor(metaTable[,i])}
+
+#write model
+design <- ~Group + Sex + Date
+
+#Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData = workingCounts,
+                              colData = metaTable,
+                              design = design)
+```
+
+```{r Run Model}
+#Run DESeq2 model
+dds <- DESeq(dds)
+
+#stabilize variance - for sample level visualizations
+vsd <- vst(dds, blind=FALSE)
+```
+
+## Exploratory Vizualization
+
+```{r Exploratory Visualization: Dispersion}
+#Dispersion
+#svg(paste(res.dir,"Dispersion.svg", sep = ""),width = 8, height = 7,bg = "white")
+plotDispEsts(dds)
+#dev.off()
+```
+
+```{r Exploratory Visualizations: Distance}
+#Distance matrix
+colors <- colorRampPalette(brewer.pal(9, "Blues") )(255)
+distanceDat<-assay(vsd)
+colnames(distanceDat)<- metaTable$Sample.Name
+sample_metadata <- data.frame(Group = c("Heterozygous", "Heterozygous", "Heterozygous", "Wildtype", "Wildtype", "Wildtype"),
+                              Sex = c("F", "M", "M", "F", "F", "M"),
+                              Date = metaTable$Date,
+                              row.names = colnames(distanceDat))
+
+ann_colors<-list(Group = c(Heterozygous="#FFD500", Wildtype="#005BBB"),
+                 Sex = c("F"="#FFBE6A", "M"="#40B0A6"),
+                 Date = c("101025" = "#6A4A3C" , "101325"="#DB1048"),
+                 row.names = colnames(distanceDat))
+
+#svg(paste(res.dir,"DistanceMap.svg", sep = ""),width = 8, height = 7, bg = "white") 
+pheatmap(cor(distanceDat),
+         clustering_distance_rows="euclidean",
+         clustering_distance_cols="euclidean",
+         cellwidth = 30,
+         cellheight = 30,
+         annotation_col = sample_metadata,
+         annotation_row = sample_metadata,
+         annotation_names_col = F,
+         annotation_names_row = F,
+         annotation_colors = ann_colors,
+         labels_row = colnames(distanceDat),
+         labels_col = c("","","","","",""),
+         col = colors)
+#dev.off()
+```
+
+```{r Exploratory Visualizations: PCA}
+#PCA
+pcaData <- plotPCA(vsd, intgroup=c("Group", "Sex"), returnData=TRUE)
+colnames(pcaData)<- c("PC1", "PC2","group.1","Group","Sex","Name")
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+#svg(paste(res.dir,"PCA.svg", sep = ""),width = 8, height = 7, bg = "white") 
+ggplot(pcaData, aes(PC1, PC2, color=Group, shape=Sex)) +
+  geom_point(size=3) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) +
+  coord_fixed()+
+  theme_bw()+
+  scale_color_manual(name = c("Heterozygous", "Wildtype"), values=c("#FFD500","#005BBB"))
+#dev.off()
+```
+
+```{r Exploratory Visualizations: PCAtools, warning=FALSE, message=FALSE}
+rv <- rowVars(assay(vsd))
+select <- order(rv, decreasing=TRUE)[1:500]
+p<- pca(assay(vsd)[select,], metadata=colData(vsd), removeVar = 0)
+
+#svg(paste(res.dir,"PCA_scree.svg", sep = ""),width = 8, height = 7, bg = "white") 
+screeplot(p)
+#dev.off()
+
+#svg(paste(res.dir,"PCA_biplot_1_2.svg", sep = ""),width = 8, height = 11, bg = "white") 
+biplot(p, x = "PC1", y = "PC2", colby = 'Group', shape = "Sex", showLoadings = TRUE,labSize = 2, pointSize = 2, sizeLoadingsNames = 2)
+#dev.off()
+
+#svg(paste(res.dir,"PCA_pairsplot.svg", sep = ""),width = 16, height = 16, bg = "white") 
+pairsplot(p, colby = 'Group', shape = 'Sex', lab = p$yvars, labSize = 3, pointSize = 2)
+#dev.off()
+
+#svg(paste(res.dir,"PCA_loadings.svg", sep = ""),width = 8, height = 11, bg = "white") 
+plotloadings(p, labSize = 3)
+#dev.off()
+```
+
+```{r MA}
+#Shrunken - Coef name shouldn't need changed but if you encounter an error check valid coef names with resultsNames(dds)
+resLFC <- lfcShrink(dds, coef="Group_Heterozygote_vs_Wildtype")
+#svg(paste(res.dir,"MA_shrunken.svg", sep = ""),width = 8, height = 7,bg = "white") 
+plotMA(resLFC, ylim=c(-4, 4), main = "MA Plot of Heterozygote vs Wildtype - Shrunken LFC")
+#dev.off()
+```
+
+## Call Result Contrasts 
+
+```{r Results}
+#Results and result plotting
+#Generate Results
+results <- results(dds, name = "Group_Heterozygote_vs_Wildtype")
+
+#Filter Results - I opt for p-adj <= 0.05 and LFC of +/- 0.5 per literature values of LFC in neuron cell culture
+res.nona <- na.omit(results)
+res.sig = res.nona[res.nona$padj <= 0.05,] ; nrow(res.sig) # for number of DE Genes at p <= 0.05
+res.sig.lfc = res.sig[abs(res.sig$log2FoldChange) > 0.5,]; nrow(res.sig.lfc) # for number of DE Genes at p <= 0.05 & FC =/- 1.5
+
+#write.csv(res.nona, paste(res.dir,"Results.csv", sep = ""), quote=FALSE)
+#write.csv(res.sig, paste(res.dir,"sigResults.csv", sep = ""), quote=FALSE)
+#write.csv(res.sig.lfc, paste(res.dir,"sig_fcResults_abs05.csv", sep = ""), quote=FALSE)
+```
+
+## Results plotting
+
+```{r Results Plotting: Volcano}
+#Volcano plot
+source("../../../Kabuki Syndrome RNASeq Analysis/OLD/old/fancy_volcano_plot.R") #Custom Volcano plot script prepared by the Patzke lab - I modified it slightly to allow for custom x axis limits and custom titles
+
+#svg(paste(res.dir,"Volcano.svg", sep = ""), width = 8, height = 7,bg = "white") 
+fancy_volcano_plot(res.nona, 0.05, 0.5, 2.5, "DEGs in Heterygous vs Wildtype")
+#dev.off()
+```
+
+```{r Results Plotting: Heatmap}
+#Heatmap
+#data prep
+sig_genes <- row.names(res.sig.lfc)
+log_sig_counts <- assay(vsd)[sig_genes, ]
+colnames(log_sig_counts)<-colData(vsd)$Sample.Name
+
+#svg(paste(res.dir,"DE_Heatmapabs05.svg", sep = ""), width = 8, height = 7, bg = "white") 
+pheatmap(na.omit(log_sig_counts),
+         cluster_rows=TRUE, cluster_cols=TRUE,   # Clustering
+         annotation_col = sample_metadata,
+         annotation_names_col = F,
+         annotation_colors = ann_colors,
+         scale="row",     # Scale by row (gene) to highlight relative expression differences
+         show_rownames=F, # Optional: hide gene names for large datasets
+         show_colnames = TRUE,
+         main="Heatmap of Significant DE Genes")
+#dev.off()
+```
