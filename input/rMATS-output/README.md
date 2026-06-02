@@ -1,1 +1,1 @@
-These files are the outputs of the /Analysis/rMATS/submit_rmats.sh script They are provided to streamline access to the R script for filtering and plotting the rMATS results.
+These files are the outputs of the /Analysis/rMATS/submit_rmats.sh script and serve as input for the processing_rmats_outputs_jcec.rmd script. They are provided to streamline access to the R script for filtering and plotting the rMATS results.
