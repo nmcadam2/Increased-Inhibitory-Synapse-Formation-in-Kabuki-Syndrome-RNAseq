@@ -32,3 +32,6 @@ Working_Directory/
     ├── Experiment1/
     └── Experiment2/
 ```
+
+# Additional Information
+Markdown documents walking through each step of the analysis are provided. A knitted version of each document is also provided as a html to show expected outputs. Preprocessing time will vary depending on hardware and available resources. The local R based analysis work should not take more than 2 hours (excluding installation of packages as this can vary based on internet connection) if you are unfamiliar with the analysis and are taking your time.
