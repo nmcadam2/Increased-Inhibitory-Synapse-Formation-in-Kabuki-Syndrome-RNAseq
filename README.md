@@ -9,7 +9,7 @@ Any code or data resuse should cite
 
 # Workflow and Version Information
 ## Workflow
-![Flow chart of the analysis workflow](Docs/flowchart.svg)
+![Flow chart of the analysis workflow](Docs/Workflow.svg)
 
 ## Versions
 ### Preprocessing
