@@ -18,7 +18,7 @@ Any code or data resuse should cite
 * featurecounts (subread v2.0.1)
 
 ### Analysis
-* R Version Information: All package versions are reported in the knitted markdown html files.
+* R Version Information: All package versions are reported in the knitted markdown html files. See Analysis/README.md for more information.
 * rMATS-turbo v4.3.0
 
 # Recommended directory structure
