@@ -13,13 +13,13 @@ Any code or data resuse should cite
 
 ## Versions
 ### Preprocessing
-* fastp
-* hisat2
-* featurecounts
+* fastp v0.24.4
+* hisat2 v2.1.0
+* featurecounts (subread v2.0.1)
 
-## Analysis
+### Analysis
 * R Version Information: All package versions are reported in the knitted markdown html files.
-* rMATS
+* rMATS-turbo v4.3.0
 
 # Recommended directory structure
 
