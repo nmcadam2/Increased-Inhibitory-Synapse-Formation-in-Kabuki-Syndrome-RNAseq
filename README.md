@@ -7,7 +7,21 @@ All associated RNA-seq data (raw fastq and processed count tables) are available
 Any code or data resuse should cite
 [insert citation when published]
 
-## Recommended directory structure
+# Workflow and Version Information
+## Workflow
+![Flow chart of the analysis workflow](Docs/flowchart.svg)
+
+## Versions
+### Preprocessing
+* fastp
+* hisat2
+* featurecounts
+
+## Analysis
+* R Version Information: All package versions are reported in the knitted markdown html files.
+* rMATS
+
+# Recommended directory structure
 
 ```text
 Working_Directory/
